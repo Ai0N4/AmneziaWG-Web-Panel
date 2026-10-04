@@ -34,7 +34,7 @@
         group: www-data
         mode: '0750'
 
-     - name: Install validated isolated nginx configuration
+    - name: Install validated isolated nginx configuration
       ansible.builtin.template:
         src: nginx.conf.j2
         dest: /etc/amneziawg-nginx/nginx.conf
