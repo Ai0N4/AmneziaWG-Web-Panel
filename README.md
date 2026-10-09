@@ -1,355 +1,91 @@
-# AmneziaWG и веб-панель: развёртывание через Ansible
+# Развёртывание AmneziaWG Web Panel
 
-Этот проект устанавливает AmneziaWG и панель управления amnezia-wg-easy на Ubuntu
-24.04 amd64. Управление выполняется с локального компьютера по SSH: Ansible на
-сервер не устанавливается.
+Краткая инструкция по развёртыванию AmneziaWG VPN через Ansible. Команды выполняются на управляющей машине с Ubuntu 24.04, которая имеет SSH-доступ к VPN-серверу.
 
-Роль рассчитана на чистый или заранее проверенный VPS. Перед запуском убедитесь,
-что на нём нет другого VPN-сервера, контейнера или правила межсетевого экрана, использующего
-те же порты либо подсеть 10.8.0.0/24.
+Перед началом подготовьте VPS-сервер с Ubuntu 24.04 amd64, публичным IP-адресом и доступом по SSH под `root`. Для VPN откройте выбранный UDP-порт (по умолчанию — `51820`), а для публичной веб-панели — TCP-порт `443`.
 
-Главные особенности развёртывания:
+## 1. Подготовить управляющую машину
 
-- используется модуль AmneziaWG для ядра Linux и актуальные инструменты AWG;
-- веб-панель запускается в Docker;
-- устаревший awg из исходного образа панели заменяется совместимой версией;
-- для туннеля настраиваются маршрутизация IPv4, NAT и минимально необходимые правила межсетевого экрана;
-- панель по умолчанию доступна только через SSH-туннель;
-- при необходимости её можно опубликовать через отдельный nginx-прокси.
+```bash
+apt update
+apt install -y python3 python3-venv python3-pip git openssh-client
 
-В примерах ниже vpn-server.example означает IP-адрес сервера, доменное имя или
-SSH-алиас. Не добавляйте реальные адреса, пароли, приватные ключи и конфигурации клиентов
-в Git.
+git clone https://github.com/Ai0N4/AmneziaWG-Web-Panel.git
+cd AmneziaWG-Web-Panel
+python3 --version
+python3 -m venv .venv
+```
 
-## Требования
+## 2. Установить зависимости
 
-Целевой сервер:
+```bash
+.venv/bin/python -m pip install --upgrade pip
+.venv/bin/pip install -r requirements.txt
+.venv/bin/ansible-galaxy collection install -r requirements.yml
+.venv/bin/ansible --version
+```
 
-- Ubuntu 24.04 amd64;
-- systemd;
-- ядро с доступными заголовками;
-- Python 3;
-- root-доступ либо пользователь с sudo без интерактивного подтверждения;
-- открытый SSH-порт;
-- исходящий HTTPS-доступ во время первого развёртывания.
+## 3. Создать и настроить inventory
 
-На сервере также должен быть разрешён UDP-порт VPN. Если панель публикуется
-наружу, разрешите и её TCP-порт в межсетевом экране провайдера.
+Сначала создайте приватный inventory из шаблона, затем откройте его для редактирования:
 
-На управляющем компьютере нужны Python 3.12 или новее, Git и SSH-клиент.
+```bash
+cp inventory.example.yml inventory.local.yml
+chmod 600 inventory.local.yml
+nano inventory.local.yml
+```
 
-## Подготовка управляющего компьютера
+В `inventory.local.yml` замените `vpn-server.example` на публичный IP-адрес или DNS-имя вашего сервера. При необходимости измените `amneziawg_port`; этот UDP-порт должен быть разрешён в firewall сервера и у провайдера.
 
-### macOS
-
-Установите Homebrew, если он ещё не установлен, затем выполните:
-
-    brew install python@3.12 git
-    git clone https://github.com/Ai0N4/AmneziaWG-Web-Panel.git
-    cd AmneziaWG-Web-Panel
-    python3.12 -m venv .venv
-
-### Linux
-
-Для Ubuntu 24.04 и современных Debian:
-
-    sudo apt update
-    sudo apt install -y python3 python3-venv python3-pip git openssh-client
-
-Для Fedora:
-
-    sudo dnf install -y python3 python3-pip git openssh-clients
-
-После этого клонируйте проект и создайте виртуальное окружение:
-
-    git clone https://github.com/Ai0N4/AmneziaWG-Web-Panel.git
-    cd AmneziaWG-Web-Panel
-    python3 --version
-    python3 -m venv .venv
-
-Если команда python3 --version показывает версию ниже 3.12, сначала установите
-поддерживаемый Python и используйте его явное имя, например python3.12.
-
-### Установка зависимостей
-
-В корневом каталоге репозитория:
-
-    .venv/bin/python -m pip install --upgrade pip
-    .venv/bin/pip install -r requirements.txt
-    .venv/bin/ansible-galaxy collection install -r requirements.yml
-    .venv/bin/ansible --version
-
-## Настройка inventory
-
-Создайте приватный inventory из шаблона. В Ansible inventory — это список целевых
-серверов и параметров подключения:
-
-    cp inventory.example.yml inventory.local.yml
-    chmod 600 inventory.local.yml
-
-Откройте inventory.local.yml и укажите адрес сервера и пользователя Ansible.
-Для SSH-ключа можно добавить путь в ansible_ssh_private_key_file либо использовать
-SSH-agent. Никогда не помещайте приватный ключ в inventory.
-
-Пример минимальной настройки:
-
+```yaml
+all:
+  children:
     vpn:
       hosts:
-        vpn-server.example:
+        amnezia:
+          ansible_host: <IP_ИЛИ_DNS_СЕРВЕРА>
           ansible_user: root
+          amneziawg_port: 51820
+          amneziawg_ui_public: true
+          amneziawg_nginx_port: 443
+          amneziawg_nginx_tls_enabled: true
+```
 
-Файл inventory.local.yml должен быть указан в .gitignore. Конфигурация проекта
-специально не подхватывает его автоматически: для реального развёртывания inventory
-нужно передавать явно. Это снижает риск запуска playbook не на том сервере.
+## 4. Проверить подключение и конфигурацию
 
-Если используется учётная запись с sudo, укажите её имя и при необходимости
-запускайте playbook с параметром --ask-become-pass.
+Замените `<IP_ИЛИ_DNS_СЕРВЕРА>` на адрес из inventory. Ключ `-k` запрашивает пароль SSH.
 
-## Проверка соединения и развёртывание
+```bash
+ssh root@<IP_ИЛИ_DNS_СЕРВЕРА> true
+.venv/bin/ansible -i inventory.local.yml vpn -m ansible.builtin.ping -k
+.venv/bin/ansible-lint
+.venv/bin/python -m unittest discover -s tests -v
+.venv/bin/ansible-playbook playbook.yml --syntax-check
+.venv/bin/ansible-playbook -i inventory.local.yml playbook.yml --check --diff -k
+```
 
-Сначала вручную подтвердите SSH-подключение и отпечаток ключа сервера:
+Если все проверки прошли, выполните развёртывание:
 
-    ssh root@vpn-server.example true
+```bash
+.venv/bin/ansible-playbook \
+  -i inventory.local.yml \
+  playbook.yml \
+  -k
+```
 
-Затем проверьте окружение проекта:
+## 5. Открыть веб-панель
 
-    .venv/bin/ansible -i inventory.local.yml vpn -m ansible.builtin.ping
-    .venv/bin/ansible-lint
-    .venv/bin/python -m unittest discover -s tests -v
-    .venv/bin/ansible-playbook playbook.yml --syntax-check
+Получите учётные данные веб-панели с сервера:
 
-Предварительная проверка без изменений:
+```bash
+ssh root@<IP_ИЛИ_DNS_СЕРВЕРА> 'cat /opt/amneziawg/nginx-username.txt /opt/amneziawg/nginx-password.txt'
+ssh root@<IP_ИЛИ_DNS_СЕРВЕРА> 'cat /opt/amneziawg/password.txt'
+```
 
-    .venv/bin/ansible-playbook -i inventory.local.yml playbook.yml --check --diff
+Откройте `https://<IP_ИЛИ_DNS_СЕРВЕРА>`. Введите пароль панели. Если браузер предупредит о сертификате, проверьте отпечаток сертификата на сервере перед продолжением.
 
-Режим --check полезен для проверки платформы и очевидных конфликтов, но он не может
-полностью смоделировать установку репозиториев, сборку DKMS, создание образа Docker,
-запуск контейнера или генерацию секретов. После предварительной проверки выполните
-обычное развёртывание:
+## Важно
 
-    .venv/bin/ansible-playbook -i inventory.local.yml playbook.yml
-
-Playbook не обновляет ОС целиком и не перезагружает сервер. После установки он
-повторно применяет конфигурацию, чтобы проверить идемпотентность.
-
-Для нескольких серверов добавьте хосты в группу vpn и используйте ограничение:
-
-    .venv/bin/ansible-playbook -i inventory.local.yml playbook.yml --limit vpn-server.example
-
-## Основные параметры
-
-Значения по умолчанию находятся в roles/amneziawg/defaults/main.yml. Переопределяйте
-их в inventory.local.yml, group_vars или host_vars.
-
-Наиболее важные переменные:
-
-- amneziawg_host — публичный IP-адрес или доменное имя VPN-сервера;
-- amneziawg_port — UDP-порт AmneziaWG, по умолчанию 51820;
-- amneziawg_external_interface — внешний интерфейс сервера, например ens3;
-- amneziawg_ui_public — публиковать ли панель через nginx;
-- amneziawg_nginx_port — публичный TCP-порт nginx;
-- amneziawg_nginx_tls_enabled — использовать ли HTTPS в nginx.
-
-Перед изменением подсети 10.8.0.0/24 убедитесь, что она не пересекается с сетью
-VPS, локальной сетью клиентов или другими туннелями.
-
-## Выбор UDP-порта VPN
-
-Параметр amneziawg_port принимает целое число от 1 до 65535. Например, чтобы
-использовать UDP 443:
-
-    amneziawg_port: 443
-
-После изменения параметра примените playbook повторно:
-
-    .venv/bin/ansible-playbook -i inventory.local.yml playbook.yml
-
-UDP 443 для VPN и TCP 443 для HTTPS могут использоваться одновременно. Это разные
-протоколы, поэтому они не конфликтуют. UDP 53 подходит только при отсутствии другого
-сервиса, который уже слушает этот порт. Даже локальный DNS-резолвер на loopback может
-создать конфликт с wildcard listener.
-
-Изменение порта пересоздаёт VPN-контейнер и ненадолго обрывает активные соединения.
-После него:
-
-1. откройте новый UDP-порт в межсетевом экране провайдера;
-2. измените адрес Endpoint в существующих клиентских конфигурациях либо скачайте их из
-   панели заново;
-3. проверьте подключение внешним клиентом.
-
-Смена порта не маскирует VPN-трафик под DNS или HTTPS. Чтобы отменить изменение,
-верните прежнее значение amneziawg_port и повторно примените playbook.
-
-## Доступ к панели через SSH
-
-По умолчанию amneziawg_ui_public имеет значение false. Панель слушает только
-127.0.0.1:51821 и не доступна из интернета.
-
-Создайте SSH-туннель на своём компьютере:
-
-    ssh -N -L 51821:127.0.0.1:51821 root@vpn-server.example
-
-После этого откройте в браузере:
-
-    http://127.0.0.1:51821
-
-Пароль панели хранится на сервере и доступен только root:
-
-    ssh root@vpn-server.example 'cat /opt/amneziawg/password.txt'
-
-Не передавайте этот пароль в командной строке, переписке, Git или логах.
-
-## Публичный доступ через nginx
-
-Если панели действительно требуется публичный адрес, задайте в приватном inventory:
-
-    amneziawg_ui_public: true
-    amneziawg_nginx_port: 443
-    amneziawg_nginx_tls_enabled: true
-    amneziawg_nginx_username: admin
-
-И снова примените playbook:
-
-    .venv/bin/ansible-playbook -i inventory.local.yml playbook.yml
-
-В этом режиме nginx принимает внешние подключения, запрашивает Basic authentication
-и проксирует запросы на внутренний сервис панели. После Basic-аутентификации нужно
-войти и в саму панель: это два независимых уровня защиты.
-
-Учётные данные nginx можно получить только через доверенное SSH-соединение:
-
-    ssh root@vpn-server.example 'cat /opt/amneziawg/nginx-username.txt /opt/amneziawg/nginx-password.txt'
-
-Пароль Basic authentication генерируется один раз и сохраняется между повторными
-запусками playbook. Открытый пароль и bcrypt-хеш доступны только root в
-/opt/amneziawg. nginx получает только файл хеша
-/etc/amneziawg-nginx/htpasswd.
-
-Публичный режим включается исключительно переменной amneziawg_ui_public. При
-значении false прокси отключается, управляемое TCP-правило межсетевого экрана удаляется, а
-панель снова остаётся доступной только через SSH-туннель.
-
-### HTTP и HTTPS
-
-Параметр amneziawg_nginx_port задаёт TCP-порт nginx. Он не может быть равен 51821,
-который зарезервирован для внутреннего сервиса панели.
-
-Для публичного развёртывания используйте HTTPS. Обычный HTTP передаёт Basic
-credentials и сессии панели без шифрования.
-
-При включённом TLS playbook создаёт самоподписанный сертификат RSA 3072 сроком на
-365 дней. Браузер покажет предупреждение, пока этот сертификат не будет добавлен
-в доверенные. Получайте сертификат только через проверенный SSH-канал и сначала
-сверяйте отпечаток:
-
-    ssh root@vpn-server.example 'openssl x509 -in /opt/amneziawg/tls/cert.pem -noout -fingerprint -sha256'
-    scp root@vpn-server.example:/opt/amneziawg/tls/cert.pem /tmp/amneziawg-cert.pem
-    curl --cacert /tmp/amneziawg-cert.pem --user admin https://vpn-server.example/api/session
-
-Закрытый ключ key.pem должен оставаться на сервере.
-
-### Автопродление самоподписанного сертификата
-
-Когда включены и публичный режим, и TLS, cron-задача
-/etc/cron.d/amneziawg-certificate запускается ежедневно в 03:17 по времени сервера.
-Она перевыпускает сертификат, если до окончания срока остаётся меньше 30 дней.
-
-Проверка состояния:
-
-    ssh root@vpn-server.example 'cat /etc/cron.d/amneziawg-certificate'
-    ssh root@vpn-server.example 'journalctl -t amneziawg-tls'
-
-Проверить сценарий без принудительного перевыпуска:
-
-    ssh root@vpn-server.example /usr/local/sbin/amneziawg-renew-certificate
-
-Принудительно перевыпустить сертификат и перезагрузить nginx:
-
-    ssh root@vpn-server.example '/usr/local/sbin/amneziawg-renew-certificate --force'
-
-После перевыпуска меняется отпечаток сертификата. Клиентам и браузерам, в которых
-был закреплён старый сертификат, потребуется обновление доверия.
-
-## Совместимость панели с AmneziaWG 3.1
-
-Базовый образ amnezia-wg-easy содержит устаревшие инструменты AWG. Они не
-совместимы с современным модулем AmneziaWG 3.1 в ядре и приводят к циклическому
-перезапуску панели: контейнер запускается, но не может применить конфигурацию к
-интерфейсу wg0.
-
-Роль устраняет эту проблему автоматически. На сервере она собирает небольшой
-производный образ:
-
-1. использует существующую веб-панель как базу;
-2. собирает официальный amneziawg-tools из зафиксированной версии исходного проекта;
-3. заменяет бинарник awg в образе;
-4. запускает панель с совместимым инструментом.
-
-Исходники, Dockerfile и артефакты сборки хранятся в /opt/amneziawg/build отдельно
-от секретов. Загруженные данные проверяются контрольной суммой SHA-256. Инструменты
-сборки остаются только на промежуточном этапе Docker, поэтому не увеличивают итоговый
-образ.
-
-Это важно при обновлении или восстановлении панели: не заменяйте рабочий образ
-обычным образом amnezia-wg-easy:latest. Для обновления панели повторно примените
-playbook, чтобы сохранить совместимую версию awg, конфигурацию, ключи и клиентов.
-
-Внешний интерфейс передаётся панели через WG_DEVICE. На большинстве VPS он называется
-ens3, но его нужно определять для каждого сервера. Неверный интерфейс приводит к
-работающему туннелю без доступа клиентов в интернет.
-
-## Проверка работы
-
-После развёртывания проверьте службы, интерфейс и внутренний HTTP endpoint:
-
-    ssh root@vpn-server.example 'systemctl is-active docker amneziawg-firewall; awg show wg0 listen-port'
-    ssh root@vpn-server.example 'curl -fsS http://127.0.0.1:51821/api/session'
-
-Для публичного режима дополнительно проверьте nginx:
-
-    ssh root@vpn-server.example 'systemctl is-active amneziawg-proxy && nginx -t -c /etc/amneziawg-nginx/nginx.conf'
-
-Полная серверная проверка не гарантирует, что VPN доступен снаружи. Обязательно
-подключите реальный клиент через другую сеть и подтвердите:
-
-1. успешный handshake;
-2. разрешение DNS-имён;
-3. выход в интернет через туннель;
-4. ожидаемый публичный IP-адрес.
-
-## Остановка и откат
-
-Чтобы остановить развёртывание и запретить его автоматический перезапуск:
-
-    .venv/bin/ansible-playbook -i inventory.local.yml rollback.yml
-
-Rollback останавливает управляемый nginx-прокси и контейнер, удаляет задачу
-автопродления сертификата и только правила межсетевого экрана, созданные этой ролью. Данные
-клиентов, ключи, сертификаты и учётные данные сохраняются.
-
-Rollback намеренно не удаляет пакеты, подключённые репозитории, модуль ядра и
-настройку маршрутизации IP: на общем сервере это может нарушить другие службы.
-Полное удаление компонентов выполняйте отдельной, заранее проверенной процедурой.
-
-Для повторного запуска после отката снова выполните:
-
-    .venv/bin/ansible-playbook -i inventory.local.yml playbook.yml
-
-## Резервное копирование и безопасность
-
-Сохраните в защищённом месте данные из /opt/amneziawg: там находятся клиентские
-ключи, конфигурация панели, пароль панели, учётные данные nginx и TLS-материалы.
-Доступ к резервной копии равнозначен доступу к VPN.
-
-Не публикуйте:
-
-- inventory.local.yml;
-- приватные SSH-ключи;
-- конфигурации клиентов;
-- файлы password.txt и nginx-password.txt;
-- key.pem;
-- вывод команд, содержащий секреты.
-
-Для каждого нового клиента создавайте отдельную конфигурацию в панели. Если серверная
-конфигурация не содержит ни одного пира, прежние клиенты подключиться не смогут:
-добавьте их заново или импортируйте их публичные ключи в панель.
+- `inventory.local.yml` содержит данные конкретного сервера: не добавляйте его в Git.
+- При авторизации по SSH-ключу укажите ключ в inventory или SSH-agent и уберите `-k` из команд.
+- `--check --diff` не вносит изменений; последняя команда запускает настоящее развёртывание.
